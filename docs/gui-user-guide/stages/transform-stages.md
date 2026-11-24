@@ -529,6 +529,7 @@ On a videosynth pressing with a −24 dB beat and the Domesday capture noise, th
 
 * A PAL LaserDisc CAV source shows the edge smear: a faint trail after every sharp edge, about a quarter of the step, decaying over a third of a microsecond. The Domesday Community sides and National A carry it. National B (CLV) does not, and neither do the other discs measured so far.
 * Run its **Channel Calibration** tool first (below). When it reports no smear, leave the stage out.
+* **Channel Tracking** (below) is an optional refinement for sources where it is worth the run: it reads the whole source (about 9.4 minutes for a Domesday side; on a stacked input, a full pass of the stack) to follow the smear along it, and the gain is small: on the Domesday sides measured, on frames held out from the tool, it lowers the bar's tail 3–8 samples after an edge by at most 0.03 % of the step on average over a side compared with Channel Calibration's smear (up to 0.4 % in the windows that take their own correction). Its track is tied to the frame numbers of the stage's input: run it again after anything upstream changes the frames (a different stack, a cut or a frame range).
 * Place it after the Stacker and Dropout Correction, beside Picture Band Limit (either order). Its filter spreads each sample over the next few, so in front of Dropout Correction it would spread a dropout's spike beyond the flagged samples.
 
 **What it does**
@@ -537,7 +538,9 @@ The smear is a one-pole tail: of a step of height 1, 1 − *c* arrives at once a
 
 The inverse puts back the 2.2 dB the smear took off the subcarrier, so a chroma gain must follow it. The stage measures each frame's colour burst after the inverse (the median over the picture lines of both fields, with the window moved on each line to follow 0H, which on the PAL 4fsc lattice falls up to 2 samples later at the bottom of a field than at the top) and scales the subcarrier band of every line by the gain that brings the burst to the nominal level. It uses the Stacker's `chroma_gain_match` shelf, which is 0 at DC and 1 at the subcarrier. The decoders in the Video Sink take the burst's phase but not its amplitude, so without this step saturation would follow each frame's chroma level. A frame whose burst would need a gain beyond 3 either way has no burst to go by, and its chroma level is left as it is: a stacked frame whose two inputs carry one field in antiphase cancels that field's burst, and scaling it to the nominal would multiply the subcarrier band about twelvefold, wrecking the picture and the VBI data with it.
 
-With `smear_fraction` 0 every frame passes **bit-identical**, chroma gain included. Any source other than PAL composite passes through unchanged, with a warning. Dropout hints pass through.
+**The smear along the source.** The smear is not one value per source: it drifts by about 1 % of the bar over a side, steps where the disc changes, and differs between the two fields and between captures. Channel Tracking corrects each window of frames (knots every 256 frames, per field, `smear_track` and `smear_track_field2`) with a correction it has **certified never worse than Channel Calibration's**: candidates (a two-component smear fitted to the VITS, and a constrained search that also measures the picture's own sharp edges) are fitted on one third of the window's frames and certified on another, by paired bootstrap, on the VITS bar's tails (3–8 and 9–30 samples), the picture edges' tails (3–8 and 9–20) and the noise. A candidate whose 97.5th-percentile excess over Channel Calibration's correction is above 0.1 % of the step on any tail or 1 % on the noise, or over no correction above 0.1 % on any tail, is not used: the window keeps Channel Calibration's smear (or stays uncorrected where Channel Calibration finds none). No correction can lower the noise below the uncorrected picture's; the chosen one never adds more than Channel Calibration's. The track itself is certified the same way on each window's certifying third, as the stage applies it: with its knots merged where the smear drifts slowly, rounded as the parameter holds them, and interpolated frame by frame. A window that fails keeps the knots around it unmerged, and if it still fails, Channel Calibration's smear.
+
+With `smear_fraction` 0 and no `smear_track`, or where the track has no smear, every frame passes **bit-identical**, chroma gain included. Any source other than PAL composite passes through unchanged, with a warning. Dropout hints pass through.
 
 On a videosynth pressing with the Domesday CAV channel (the edge smear and the inner-radius replay response) and the capture noise, the stage at the value Channel Calibration reads brings the composite back towards the same pressing without the channel. The figures are the r.m.s. difference from that pressing in IRE, with the channel → after the stage:
 
@@ -560,6 +563,12 @@ The edge smear sits mostly below 2 MHz, where the stage removes about two thirds
     - The tail's time constant, in 4fsc samples (one is 56 ns). Set it with Channel Calibration.
     - Range: 2–50.
     - Default: 6.1, the Domesday CAV sides'.
+* `smear_track` (string)
+    - The smear measured along the source: knots `frame:fraction:tau`, or `frame:fraction:tau:fast_fraction:fast_tau` with a fast component, separated by `;`. Set it with Channel Tracking.
+    - When set, each frame takes its smear from the track, and the two values above are not used.
+    - Default: empty.
+* `smear_track_field2` (string)
+    - The second field's track, in the same form. Set it with Channel Tracking. Empty: the second field takes `smear_track`.
 
 **Analysis / preview tools**
 
@@ -570,6 +579,14 @@ The edge smear sits mostly below 2 MHz, where the stage removes about two thirds
     - **The result.** The source's smear is the median of the accepted fits. **Apply to Stage** sets `smear_fraction` and `smear_tau_samples`, or `smear_fraction` 0 when the source has no smear. A smear longer than the stage's 50-sample limit is reported with its fit and not applied.
     - **Readings so far.** It reads 0.243 / 6.13 samples on Community South, and no smear on National B and Volcanoes.
     - From the command line: `orc-cli tools run disc.orcprj channel_calibration --node <node> --apply`.
+* **Channel Tracking** (`channel_tracking`) follows the smear along the source and sets `smear_track`. It is a refinement of Channel Calibration, not a replacement for it.
+    - **What it reads.** Line 19 of both fields of every frame, and the picture of every 32nd frame (both fields; more often on a short source, every frame under 512). It runs Channel Calibration on the input as well. That is a full read of the source: about 9.4 minutes for a Domesday side.
+    - **What it gains.** Little: on the Domesday sides measured, on held-out frames, at most 0.03 % of the step at the bar's 3–8 sample tail on average over a side, up to 0.4 % in the windows that take their own correction; most windows (about four in five on the Community North sides, nine in ten on National A) keep Channel Calibration's smear.
+    - **Frame numbers.** The knots are tied to the frame numbers of the stage's input. If anything upstream changes the frames (a different stack, a cut, a frame range), the track no longer matches them: run the tool again.
+    - **The choice.** Per window of 256 frames: the certified candidate, or Channel Calibration's smear (see *The smear along the source*).
+    - **Option.** `near_edge` (off by default) also offers the VITS fit where only a tail confined near the edge is seen; it is applied only where certified.
+    - **The result.** **Apply to Stage** sets `smear_track` and `smear_track_field2`, or clears them and sets `smear_fraction` 0 when no window has a correction.
+    - From the command line: `orc-cli tools run disc.orcprj channel_tracking --node <node> --apply`.
 * Supports the standard GUI preview.
 
 ---

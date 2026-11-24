@@ -516,6 +516,7 @@ stage.
 | `source_alignment` | Source Align | Aligns the discs of a stack by picture number or CLV time code | `--apply` writes `alignmentMap` and `alignmentMode` |
 | `fm_beat_calibration` | FM Beat Cancel | FM Beat Calibration: measures the master's FM carrier from the beat on the stage's input | `--apply` writes `carrier_black_mhz` |
 | `channel_calibration` | Channel Equalise | Channel Calibration: measures the edge smear from the VITS on field 1 line 19 | `--apply` writes `smear_fraction` and `smear_tau_samples` |
+| `channel_tracking` | Channel Equalise | Channel Tracking: follows the edge smear along the source from line 19 of every field and the picture's edges, certified never worse than Channel Calibration's | `--apply` writes `smear_track` and `smear_track_field2` |
 | `dropout_analysis`, `snr_analysis`, `burst_level_analysis` | The analysis sinks | Run the sink and report its per-frame results | Report only; `--csv` writes them |
 | `mask_line_config`, `ffmpeg_preset_config` | Mask Line, video sinks | Preset pickers | No: set the parameters with `nodes set` |
 | `dropout_editor` | Dropout Map | Marking dropouts by hand | No: GUI only |

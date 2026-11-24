@@ -177,6 +177,7 @@ orc_add_core_unit_tests(
         stages/channel_equalise/channel_equalise_stage_test.cpp
         stages/channel_equalise/channel_calibration_test.cpp
         stages/channel_equalise/channel_calibration_tool_test.cpp
+        stages/channel_equalise/channel_tracking_test.cpp
         stages/efm_audio_decode/efm_audio_decode_stage_test.cpp
         stages/audio_import/audio_import_stage_test.cpp
         stages/audio_import/audio_import_formats_test.cpp
