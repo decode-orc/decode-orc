@@ -27,6 +27,8 @@
 #include <string>
 #include <vector>
 
+#include "smear_track.h"
+
 namespace orc {
 
 // ============================================================================
@@ -38,7 +40,8 @@ class EqualisedVideoFrameRepresentation
  public:
   EqualisedVideoFrameRepresentation(
       std::shared_ptr<const VideoFrameRepresentation> source,
-      channel_equalise::EdgeSmear smear);
+      channel_equalise::EdgeSmear smear, SmearTrack track = {},
+      SmearTrack track_field2 = {});
 
   std::string type_name() const override {
     return "equalised_video_frame_representation";
@@ -60,6 +63,12 @@ class EqualisedVideoFrameRepresentation
 
  private:
   channel_equalise::EdgeSmear smear_;
+  // When not empty, each frame's smear: |smear_| is then not used. The
+  // second field takes |track_field2_|, or |track_| when that is empty.
+  SmearTrack track_;
+  SmearTrack track_field2_;
+
+  channel_equalise::EdgeSmear smear_for(FrameID id, int field) const;
 
   // Equalised frames; an empty entry is a frame read from the source as it
   // is (not PAL composite, or short).
@@ -81,7 +90,7 @@ class ChannelEqualiseStage : public DAGStage,
  public:
   ChannelEqualiseStage();
 
-  std::string version() const override { return "1.1"; }
+  std::string version() const override { return "1.2"; }
   ORC_STAGE_INSTRUCTIONS_MD
 
   NodeTypeInfo get_node_type_info() const override {
@@ -117,7 +126,8 @@ class ChannelEqualiseStage : public DAGStage,
   StagePreviewCapability get_preview_capability() const override;
 
   // StageToolProvider: Channel Calibration, which measures the edge smear on
-  // the input (IStageAnalysisTool).
+  // the input, and Channel Tracking, which follows it along the input
+  // (IStageAnalysisTool).
   std::vector<StageToolDescriptor> get_stage_tools() const override;
 
   // IStageAnalysisTool
@@ -130,6 +140,8 @@ class ChannelEqualiseStage : public DAGStage,
 
  private:
   channel_equalise::EdgeSmear smear_{0.0, 6.1};
+  SmearTrack track_;
+  SmearTrack track_field2_;
 
   mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
 };

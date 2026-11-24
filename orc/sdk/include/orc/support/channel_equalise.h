@@ -44,15 +44,44 @@ inline constexpr double kMaxFraction = 0.45;
 inline constexpr double kMinTauSamples = 2.0;
 inline constexpr double kMaxTauSamples = 50.0;
 
+// A second, fast component of the smear, for the part of the tail within a
+// few samples of an edge:
+//   H(z) = 1 + c (L_tau(z) - 1) + f (L_fast(z) - 1),
+// L_t(z) = (1 - a) / (1 - a z^-1), a = exp(-1 / t). Its fraction is signed:
+// negative where the tail starts more slowly than the slow component alone
+// would (the Domesday sides), positive for a tail confined near the edge.
+inline constexpr double kMinFastFraction = -0.45;
+inline constexpr double kMaxFastFraction = 0.3;
+inline constexpr double kMinFastTauSamples = 0.5;
+inline constexpr double kMaxFastTauSamples = 4.5;
+
 struct EdgeSmear {
   double fraction = 0.0;
   double tau_samples = 1.0;
+  // The fast component; 0 leaves the one-pole smear above.
+  double fast_fraction = 0.0;
+  double fast_tau_samples = 1.0;
 
-  bool active() const { return fraction > 0.0; }
+  bool active() const { return fraction > 0.0 || fast_fraction != 0.0; }
+  bool operator==(const EdgeSmear& o) const {
+    return fraction == o.fraction && tau_samples == o.tau_samples &&
+           fast_fraction == o.fast_fraction &&
+           fast_tau_samples == o.fast_tau_samples;
+  }
+  bool operator!=(const EdgeSmear& o) const { return !(*this == o); }
 };
 
+// Whether the smear's inverse is stable with a margin (its poles within
+// 0.98 of the origin). A one-pole smear within its range always is.
+bool invertible(const EdgeSmear& smear);
+
 // The smear's inverse over one contiguous stream, in place, its state primed
-// to the first sample's level.
+// to the first sample's level. Without a fast component this is the
+// one-pole inverse; with one, the second-order inverse
+//   1 / H(z) = D(z) / N(z),  D = (1 - a z^-1)(1 - b z^-1),
+//   N = (1 - c - f) D + c (1 - a)(1 - b z^-1) + f (1 - b)(1 - a z^-1),
+// a and b the slow and fast poles. A smear that is not invertible() leaves
+// the stream as it is.
 void unsmear(std::vector<double>& stream, const EdgeSmear& smear);
 
 // The median burst amplitude of a PAL frame-flat buffer over the picture
@@ -98,5 +127,14 @@ struct FrameResult {
 FrameResult equalise_frame(const int16_t* frame, size_t samples_total,
                            size_t samples_per_line, double blanking_level,
                            double white_level, const EdgeSmear& smear);
+
+// The same with a smear for each field: the first field's lines (frame-flat
+// 0-312) through |first_field|'s inverse, the second's through
+// |second_field|'s, each primed at its own first sample. Equal smears are
+// one pass over the frame, as above.
+FrameResult equalise_frame(const int16_t* frame, size_t samples_total,
+                           size_t samples_per_line, double blanking_level,
+                           double white_level, const EdgeSmear& first_field,
+                           const EdgeSmear& second_field);
 
 }  // namespace orc::channel_equalise

@@ -82,7 +82,8 @@ orc::ChannelWindow window(orc::SmearVerdict verdict, double fraction,
 TEST(ChannelCalibrationToolTest, TheStageOffersItAsAnAnalysisTool) {
   orc::ChannelEqualiseStage stage;
   const auto tools = stage.get_stage_tools();
-  ASSERT_EQ(tools.size(), 1u);
+  // Channel Tracking follows it (channel_tracking_test).
+  ASSERT_EQ(tools.size(), 2u);
   EXPECT_EQ(tools[0].tool_id, "channel_calibration");
   EXPECT_EQ(tools[0].display_name, "Channel Calibration");
   EXPECT_EQ(tools[0].kind, orc::StageToolKind::Analysis);
