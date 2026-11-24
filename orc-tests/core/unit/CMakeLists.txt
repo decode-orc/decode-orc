@@ -79,6 +79,7 @@ function(orc_add_core_unit_tests target labels)
                         orc-stage-plugin-mask-line
                         orc-stage-plugin-picture-band-limit
                         orc-stage-plugin-fm-beat-cancel
+                        orc-stage-plugin-edge-ring-correct
                         orc-stage-plugin-channel-equalise
                         orc-stage-plugin-video-sink
                         orc-stage-plugin-daphne-vbi-sink
@@ -174,6 +175,7 @@ orc_add_core_unit_tests(
         stages/fm_beat_cancel/fm_beat_cancel_stage_test.cpp
         stages/fm_beat_cancel/fm_beat_calibration_test.cpp
         stages/fm_beat_cancel/fm_beat_calibration_tool_test.cpp
+        stages/edge_ring_correct/edge_ring_correct_test.cpp
         stages/channel_equalise/channel_equalise_stage_test.cpp
         stages/channel_equalise/channel_calibration_test.cpp
         stages/channel_equalise/channel_calibration_tool_test.cpp

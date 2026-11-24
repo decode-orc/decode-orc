@@ -1,0 +1,134 @@
+/*
+ * File:        edge_ring_correct_stage.h
+ * Module:      orc-stage-plugin-edge-ring-correct
+ * Purpose:     Removes the ring after sharp picture edges and the halo after
+ *              thin dark lines of PAL LaserDisc pictures, window by window
+ *              where it is certified better (composite stays composite)
+ *
+ * SPDX-License-Identifier: GPL-3.0-or-later
+ * SPDX-FileCopyrightText: 2026 decode-orc contributors
+ */
+
+#pragma once
+
+#include <orc/plugin/orc_stage_preview.h>
+#include <orc/plugin/orc_stage_runtime.h>
+#include <orc/plugin/orc_stage_tooling.h>
+#include <orc/stage/artifact.h>
+#include <orc/stage/params/stage_parameter.h>
+#include <orc/stage/tooling/stage_analysis_tool.h>
+#include <orc/stage/video_frame_representation.h>
+#include <orc/support/frame_cache.h>
+
+#include <algorithm>
+#include <cstdint>
+#include <map>
+#include <memory>
+#include <string>
+#include <vector>
+
+#include "edge_ring_track.h"
+
+namespace orc {
+
+// ============================================================================
+// RingCorrectedVideoFrameRepresentation
+// ============================================================================
+class RingCorrectedVideoFrameRepresentation
+    : public VideoFrameRepresentationWrapper,
+      public Artifact {
+ public:
+  RingCorrectedVideoFrameRepresentation(
+      std::shared_ptr<const VideoFrameRepresentation> source,
+      edge_ring::RingTrack track);
+
+  std::string type_name() const override {
+    return "ring_corrected_video_frame_representation";
+  }
+
+  const int16_t* get_frame(FrameID id) const override;
+  const int16_t* get_line(FrameID id, size_t line) const override;
+  std::vector<int16_t> get_frame_copy(FrameID id) const override;
+
+  size_t max_concurrent_frame_requests() const override {
+    return std::min(source_->max_concurrent_frame_requests(),
+                    nominal_frame_cache_capacity());
+  }
+
+  // Thread safety: every method may be called from many threads at once. A
+  // pointer from get_frame() or get_line() stays valid until the calling
+  // thread's next call on this object.
+
+ private:
+  edge_ring::RingTrack track_;
+
+  // Corrected frames; an empty entry is a frame left as the source's.
+  using Frame = std::shared_ptr<const std::vector<int16_t>>;
+  mutable FrameCache<std::vector<int16_t>> frames_;
+
+  Frame corrected(FrameID id) const;
+  Frame build_corrected(FrameID id) const;
+};
+
+// ============================================================================
+// EdgeRingCorrectStage
+// ============================================================================
+class EdgeRingCorrectStage : public DAGStage,
+                             public ParameterizedStage,
+                             public IStagePreviewCapability,
+                             public StageToolProvider,
+                             public IStageAnalysisTool {
+ public:
+  std::string version() const override { return "1.0"; }
+  ORC_STAGE_INSTRUCTIONS_MD
+
+  NodeTypeInfo get_node_type_info() const override {
+    return NodeTypeInfo{NodeType::TRANSFORM,
+                        "edge_ring_correct",
+                        "Edge Ring Correct",
+                        "Remove the ring after sharp edges and the halo "
+                        "after thin dark lines of PAL LaserDisc pictures",
+                        1,
+                        1,
+                        1,
+                        UINT32_MAX,
+                        VideoFormatCompatibility::PAL_ONLY};
+  }
+
+  std::vector<ArtifactPtr> execute(
+      const std::vector<ArtifactPtr>& inputs,
+      const std::map<std::string, ParameterValue>& parameters,
+      ObservationContext& observation_context) override;
+
+  size_t required_input_count() const override { return 1; }
+  size_t output_count() const override { return 1; }
+
+  // ParameterizedStage
+  std::vector<ParameterDescriptor> get_parameter_descriptors(
+      VideoSystem project_format, SourceType source_type) const override;
+  using ParameterizedStage::get_parameter_descriptors;
+  std::map<std::string, ParameterValue> get_parameters() const override;
+  bool set_parameters(
+      const std::map<std::string, ParameterValue>& params) override;
+
+  // IStagePreviewCapability
+  StagePreviewCapability get_preview_capability() const override;
+
+  // StageToolProvider: Edge Ring Calibration (IStageAnalysisTool).
+  std::vector<StageToolDescriptor> get_stage_tools() const override;
+
+  // IStageAnalysisTool
+  std::vector<ParameterDescriptor> analysis_tool_parameters(
+      const std::string& tool_id) const override;
+  StageAnalysisReport run_analysis_tool(
+      const std::string& tool_id,
+      const std::map<std::string, ParameterValue>& parameters,
+      IToolJobContext& context) override;
+
+ private:
+  edge_ring::RingTrack track_;
+
+  mutable std::shared_ptr<const VideoFrameRepresentation> cached_output_;
+};
+
+}  // namespace orc

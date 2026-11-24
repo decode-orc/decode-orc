@@ -515,6 +515,38 @@ On a videosynth pressing with a −24 dB beat and the Domesday capture noise, th
 
 ---
 
+## Edge Ring Correct
+
+| | |
+|-|-|
+| **Stage id** | `edge_ring_correct` |
+| **Stage name** | Edge Ring Correct |
+| **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | PAL only |
+| **Purpose** | Remove the ring after sharp edges and the white halo after thin dark lines of PAL LaserDisc pictures, where certified better |
+
+**Use this stage when:**
+
+* A PAL LaserDisc source shows a dark dip a few samples after black-to-white edges, or a white halo right of the dark lines of maps and line drawings. The Domesday Community sides carry both.
+* Run its **Edge Ring Calibration** tool first (below); it writes `ring_track`. Windows it cannot certify stay uncorrected, so on a source without the ring the track stays empty and the stage changes nothing.
+* Place it after the Stacker, Dropout Correction and Channel Equalise, before the Video Sink.
+
+**What it does**
+
+It works on the composite, before the chroma decoder: the ring is a 5 MHz luma oscillation that in the composite lies in the chroma band, so removing it there removes both its luma and its cross-colour. Sharp steps and thin dark lines are found on the line's luma (the composite line itself where its grounds carry no subcarrier, otherwise the vertical comb where the feature is vertically aligned), and at each one a template measured on the window's own steps and lines is subtracted, scaled by the feature's step or depth and by a per-frame gain measured on the frame itself. Only the samples from 2 to 20 after an edge or line change; everything else, flat areas included, passes **bit-identical**, as does every frame outside a certified window.
+
+**Parameters**
+
+* `ring_track` (string)
+    - The certified corrections, one per window of frames. Set it with Edge Ring Calibration. Default: empty (no correction).
+
+**Analysis / preview tools**
+
+* **Edge Ring Calibration** (`edge_ring_calibration`) fits the templates on a third of each ~1024-frame window's frames, certifies each candidate correction on a second third (paired bootstrap, 97.5 % bound: no edge, halo, noise or level measure worse beyond 0.1 % of the step / 0.05 dB / 0.1 IRE, and a summed gain of at least 0.5 % of the step), and reports on the last third, which neither step saw. **Apply to Stage** sets `ring_track`. From the command line: `orc-cli tools run disc.orcprj edge_ring_calibration --node <node> --apply`.
+* Supports the standard GUI preview.
+
+---
+
 ## Channel Equalise
 
 | | |
