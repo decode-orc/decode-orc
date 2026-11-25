@@ -37,13 +37,14 @@ class CertifyField {
   explicit CertifyField(FieldImage field);
   const ProfileSums& before() const { return before_; }
   const FlatStats& flat_before() const { return flat_before_; }
-  // The measures with |window| applied at |gains|.
+  // The measures with |window| applied at |gains|, its frame line-art or not.
   std::pair<ProfileSums, FlatStats> after(const WindowCorrection& window,
-                                          const Gains& gains) const;
+                                          const Gains& gains,
+                                          bool line_art) const;
 
  private:
   FieldImage field_;
-  Features correction_;
+  std::vector<Event> events_;
   Features measured_;
   ProfileSums before_;
   std::vector<uint8_t> flat_, large_flat_;
@@ -58,12 +59,10 @@ class CertifyField {
 // (halo) and its value at +3 (halo3); and over flat areas the luma noise
 // (dB) and level change. Each is the count-weighted mean over frames of the
 // frame's own measure, so content mixes do not cancel.
-inline constexpr std::array<const char*, 8> kEdgeMeasures = {
-    "rise_post", "rise_pre",  "rise_tail", "fall_post",
-    "fall_pre",  "fall_tail", "halo",      "halo3"};
-inline constexpr std::array<const char*, 10> kAllMeasures = {
-    "rise_post", "rise_pre", "rise_tail", "fall_post", "fall_pre",
-    "fall_tail", "halo",     "halo3",     "noise_db",  "level"};
+// (rise: isolated rising steps; fill: fill-edge rising steps.)
+inline constexpr std::array<const char*, 11> kEdgeMeasures = {
+    "rise_post", "rise_pre", "rise_tail", "fill_post", "fill_pre", "fill_tail",
+    "fall_post", "fall_pre", "fall_tail", "halo",      "halo3"};
 
 struct MeasureComparison {
   double before = 0.0;
@@ -75,10 +74,13 @@ struct MeasureComparison {
 
 struct Comparison {
   std::map<std::string, MeasureComparison> measures;
-  int rises = 0, falls = 0, lines = 0;
+  int rises = 0, fills = 0, falls = 0, lines = 0;
   int line_art_frames = 0;
   // The bootstrapped 97.5 % bound of the summed edge measures' change.
   double gain_bound = 0.0;
+  // The share of frames (of those with any edge measure) on which the summed
+  // edge measures improved.
+  double frame_share = 0.0;
 };
 
 // Paired comparison over |fields| (frame pairs: fields 2k and 2k+1) of the
@@ -101,6 +103,9 @@ struct Certificate {
 inline constexpr double kEdgeBand = 1.0;
 inline constexpr double kNoiseBandDb = 0.05;
 inline constexpr double kLevelBand = 0.001;
+// ... and the summed edge measures must improve on at least this share of
+// the certifying frames (a gain carried by a few frames is not certain).
+inline constexpr double kMinFrameShare = 0.6;
 inline constexpr double kMinGain = 5.0;
 inline constexpr int kBootstrapDraws = 300;
 

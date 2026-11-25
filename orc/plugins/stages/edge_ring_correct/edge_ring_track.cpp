@@ -87,33 +87,63 @@ std::string gain_text(double g) {
 std::optional<RingTrack> RingTrack::from_windows(
     std::vector<WindowCorrection> windows) {
   int64_t last_end = -1;
+  // the rising level templates are the source's, shared by every window
+  std::shared_ptr<const LevelTables> levels;
+  for (const auto& w : windows) {
+    if (w.levels) {
+      levels = w.levels;
+      break;
+    }
+  }
+  if (levels) {
+    auto q = std::make_shared<LevelTables>(*levels);
+    for (auto& c : *q) {
+      for (auto& t : c) {
+        for (double v : t) {
+          if (!(std::abs(v) <= 1.0)) return std::nullopt;
+        }
+        quantise(t);
+      }
+    }
+    levels = q;
+  }
   for (auto& w : windows) {
     if (w.end_frame <= w.first_frame || w.first_frame < last_end) {
       return std::nullopt;
     }
     last_end = w.end_frame;
-    for (double g : {w.gains.rise, w.gains.fall, w.gains.line}) {
+    for (double g : {w.gains.rise, w.gains.fall, w.gains.line, w.gains.fill}) {
       if (!(g >= 0.0 && g <= 1.0)) return std::nullopt;
     }
-    for (const auto* t : {&w.templates.rise, &w.templates.fall}) {
-      for (double v : *t) {
-        if (!(std::abs(v) <= 1.0)) return std::nullopt;
-      }
+    if ((w.gains.rise != 0.0 || w.gains.fill != 0.0) && !levels) {
+      return std::nullopt;
+    }
+    for (double v : w.templates.fall) {
+      if (!(std::abs(v) <= 1.0)) return std::nullopt;
     }
     for (double v : w.templates.line) {
       if (!(std::abs(v) <= 1.0)) return std::nullopt;
     }
     // as the text form holds them, so a track behaves the same written out
     // and read back
-    quantise(w.templates.rise);
+    w.templates.rise = StepTable{};
     quantise(w.templates.fall);
     quantise(w.templates.line);
-    w.gains.rise = std::llround(w.gains.rise * 1000.0) / 1000.0;
-    w.gains.fall = std::llround(w.gains.fall * 1000.0) / 1000.0;
-    w.gains.line = std::llround(w.gains.line * 1000.0) / 1000.0;
+    w.levels = levels;
+    for (double* g :
+         {&w.gains.rise, &w.gains.fall, &w.gains.line, &w.gains.fill}) {
+      *g = std::llround(*g * 1000.0) / 1000.0;
+    }
+    if (!(w.kappa_rise >= 0.5 && w.kappa_rise <= 2.0 && w.kappa_fall >= 0.5 &&
+          w.kappa_fall <= 2.0)) {
+      return std::nullopt;
+    }
+    w.kappa_rise = std::llround(w.kappa_rise * 1000.0) / 1000.0;
+    w.kappa_fall = std::llround(w.kappa_fall * 1000.0) / 1000.0;
   }
   RingTrack t;
   t.windows_ = std::move(windows);
+  t.levels_ = levels;
   return t;
 }
 
@@ -126,8 +156,25 @@ std::optional<RingTrack> RingTrack::parse(const std::string& raw) {
                                : raw.substr(first, last - first + 1);
   if (text.empty()) return RingTrack{};
   std::vector<WindowCorrection> windows;
+  std::shared_ptr<LevelTables> levels;
   for (const auto& item : split(text, ';')) {
     const auto f = split(item, ':');
+    if (f.size() == 2 && f[0] == "levels") {
+      // the rising templates: class 0 bins then class 1 bins, "/" between
+      const auto tables = split(f[1], '/');
+      if (levels || tables.size() != kRiseClasses * kLevelBins) {
+        return std::nullopt;
+      }
+      levels = std::make_shared<LevelTables>();
+      for (int c = 0; c < kRiseClasses; ++c) {
+        for (int b = 0; b < kLevelBins; ++b) {
+          if (!parse_table(tables[c * kLevelBins + b], (*levels)[c][b])) {
+            return std::nullopt;
+          }
+        }
+      }
+      continue;
+    }
     if (f.size() != 6) return std::nullopt;
     WindowCorrection w;
     const auto range = split(f[0], '-');
@@ -141,31 +188,45 @@ std::optional<RingTrack> RingTrack::parse(const std::string& raw) {
     if (f[1] != "f" && f[1] != "w") return std::nullopt;
     w.adapt = f[1] == "f";
     const auto g = split(f[2], ',');
-    if (g.size() != 3 || !parse_double(g[0], w.gains.rise) ||
+    if (g.size() != 4 || !parse_double(g[0], w.gains.rise) ||
         !parse_double(g[1], w.gains.fall) ||
-        !parse_double(g[2], w.gains.line)) {
+        !parse_double(g[2], w.gains.line) ||
+        !parse_double(g[3], w.gains.fill)) {
       return std::nullopt;
     }
-    if (!parse_table(f[3], w.templates.rise) ||
-        !parse_table(f[4], w.templates.fall) ||
+    const auto k = split(f[3], ',');
+    if (k.size() != 2 || !parse_double(k[0], w.kappa_rise) ||
+        !parse_double(k[1], w.kappa_fall)) {
+      return std::nullopt;
+    }
+    if (!parse_table(f[4], w.templates.fall) ||
         !parse_table(f[5], w.templates.line)) {
       return std::nullopt;
     }
     windows.push_back(w);
   }
+  for (auto& w : windows) w.levels = levels;
   return from_windows(std::move(windows));
 }
 
 std::string RingTrack::to_string() const {
   std::ostringstream o;
+  if (levels_) {
+    o << "levels:";
+    for (int c = 0; c < kRiseClasses; ++c) {
+      for (int b = 0; b < kLevelBins; ++b) {
+        if (c || b) o << '/';
+        write_table(o, (*levels_)[c][b]);
+      }
+    }
+  }
   for (size_t k = 0; k < windows_.size(); ++k) {
     const auto& w = windows_[k];
-    if (k) o << ';';
+    if (k || levels_) o << ';';
     o << w.first_frame << '-' << w.end_frame << ':' << (w.adapt ? 'f' : 'w')
       << ':' << gain_text(w.gains.rise) << ',' << gain_text(w.gains.fall) << ','
-      << gain_text(w.gains.line) << ':';
-    write_table(o, w.templates.rise);
-    o << ':';
+      << gain_text(w.gains.line) << ',' << gain_text(w.gains.fill) << ':'
+      << gain_text(w.kappa_rise) << ',' << gain_text(w.kappa_fall) << ':';
     write_table(o, w.templates.fall);
     o << ':';
     write_table(o, w.templates.line);

@@ -42,6 +42,7 @@ StageAnalysisReport report(const EdgeRingCalibration& c) {
     if (w.accepted) {
       item.message = std::string(w.chosen.adapt ? "per-frame" : "fixed") +
                      " gains rise " + fixed(w.chosen.gains.rise, 2) +
+                     ", fill edge " + fixed(w.chosen.gains.fill, 2) +
                      ", fall " + fixed(w.chosen.gains.fall, 2) + ", line " +
                      fixed(w.chosen.gains.line, 2);
     } else {

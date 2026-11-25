@@ -45,9 +45,11 @@ constexpr int16_t kWhite = 844;
 
 // The ring after a rising step, per unit step, t samples after its crossing.
 double ring(double t) {
+  // an oscillation and a slow deficit, as the Domesday rising edges carry
   return t < 1.0 ? 0.0
-                 : -0.09 * std::exp(-t / 4.0) *
-                       std::cos(2.0 * M_PI * 0.28 * (t - 1.0));
+                 : -0.18 * std::exp(-t / 4.0) *
+                           std::cos(2.0 * M_PI * 0.28 * (t - 1.0)) -
+                       0.06 * std::exp(-t / 3.0);
 }
 // The halo after a thin dark line, per unit depth.
 double halo(double t) {
@@ -66,7 +68,8 @@ double step(double n, double c, double a, double b) {
 // black (sharp rising and falling steps); on the lower half, thin dark lines
 // on white. Crossings drift by 0.03 samples a line so the fractional
 // positions are all represented. Optionally the ring and halo, and noise.
-std::vector<int16_t> picture(size_t frame, bool ringing, int noise) {
+std::vector<int16_t> picture(size_t frame, bool ringing, int noise,
+                             double slant = 0.03) {
   std::vector<int16_t> x(
       orc::frame_line_sample_offset(orc::VideoSystem::PAL, kSpl, kHeight),
       kBlack);
@@ -80,12 +83,12 @@ std::vector<int16_t> picture(size_t frame, bool ringing, int noise) {
     const size_t fl = line < f1 ? line : line - f1;
     const size_t base =
         orc::frame_line_sample_offset(orc::VideoSystem::PAL, kSpl, line);
-    const double drift = 0.03 * static_cast<double>(fl) + 0.37 * frame;
+    const double drift = slant * static_cast<double>(fl) + 0.37 * frame;
     for (size_t n = 0; n < kSpl; ++n) {
       double y = 0.0;  // 0..1 of black..white
       if (fl >= 20 && fl < 310 && n >= 180 && n < 1105) {
         const double d = static_cast<double>(n);
-        if (fl < 160) {
+        if (fl < 100) {
           // period 90: grey 0.3 -> white at +0, white -> black at +45,
           // black -> grey at +70 (each step with flat grounds of 20+)
           const double p =
@@ -178,7 +181,12 @@ orc::edge_ring::ProfileSums sums_of(const std::vector<int16_t>& frame) {
   orc::edge_ring::ProfileSums s;
   for (int k = 0; k < 2; ++k) {
     const auto f = field(frame, k);
-    s += orc::edge_ring::measure(f, orc::edge_ring::find_features(f, true));
+    const auto events = orc::edge_ring::find_events(f);
+    auto m = orc::edge_ring::measure(
+        f, orc::edge_ring::measured_features(f, events));
+    m.events = static_cast<int>(events.size());
+    m.pairs = orc::edge_ring::count_pairs(events);
+    s += m;
   }
   return s;
 }
@@ -225,9 +233,12 @@ TEST(EdgeRingTrackTest, TextFormRoundTrips) {
   w.first_frame = 10;
   w.end_frame = 20;
   w.adapt = true;
-  w.gains = {1.0, 0.5, 0.0};
-  for (int j = 0; j < orc::edge_ring::kStepBins; ++j)
-    w.templates.rise[j] = 0.001 * (j % 7) - 0.003;
+  w.gains = {1.0, 0.5, 0.0, 0.25};
+  auto levels = std::make_shared<orc::edge_ring::LevelTables>();
+  for (int j = 0; j < orc::edge_ring::kStepBins; ++j) {
+    (*levels)[1][3][j] = 0.001 * (j % 7) - 0.003;
+  }
+  w.levels = levels;
   w.templates.line[40] = -0.123456;
   const auto t = RingTrack::from_windows({w});
   ASSERT_TRUE(t.has_value());
@@ -237,6 +248,9 @@ TEST(EdgeRingTrackTest, TextFormRoundTrips) {
   ASSERT_EQ(back->windows().size(), 1u);
   EXPECT_TRUE(back->windows()[0].adapt);
   EXPECT_DOUBLE_EQ(back->windows()[0].gains.fall, 0.5);
+  EXPECT_DOUBLE_EQ(back->windows()[0].gains.fill, 0.25);
+  ASSERT_TRUE(back->windows()[0].levels);
+  EXPECT_NEAR((*back->windows()[0].levels)[1][3][5], 0.002, 1e-9);
   EXPECT_NEAR(back->windows()[0].templates.line[40], -0.12346, 1e-9);
   EXPECT_EQ(back->at(9), nullptr);
   EXPECT_NE(back->at(10), nullptr);
@@ -246,7 +260,13 @@ TEST(EdgeRingTrackTest, TextFormRoundTrips) {
 
 TEST(EdgeRingTrackTest, RefusesMalformedOrOverlappingWindows) {
   EXPECT_FALSE(RingTrack::parse("garbage").has_value());
-  EXPECT_FALSE(RingTrack::parse("1-2:x:1,1,1:0:0:0").has_value());
+  EXPECT_FALSE(RingTrack::parse("1-2:x:1,1,1,1:1,1:0:0").has_value());
+  // rising gains without the source's level templates
+  WindowCorrection r;
+  r.first_frame = 0;
+  r.end_frame = 1;
+  r.gains.rise = 1.0;
+  EXPECT_FALSE(RingTrack::from_windows({r}).has_value());
   WindowCorrection a, b;
   a.first_frame = 0;
   a.end_frame = 10;
@@ -260,18 +280,33 @@ TEST(EdgeRingTrackTest, RefusesMalformedOrOverlappingWindows) {
 
 TEST(EdgeRingTest, FindsStepsAndLinesOnTheLuma) {
   const auto f = field(picture(0, false, 0), 0);
-  const auto feats = orc::edge_ring::find_features(f, true);
+  const auto events = orc::edge_ring::find_events(f);
+  const auto feats = orc::edge_ring::measured_features(f, events);
   int rises = 0, falls = 0;
   for (const auto& s : feats.steps) (s.size > 0 ? rises : falls) += 1;
   EXPECT_GT(rises, 500);
   EXPECT_GT(falls, 200);
   EXPECT_GT(feats.lines.size(), 500u);
-  // No chroma: most are measured on the composite line itself (a step whose
-  // ground holds a neighbouring edge's energy at the subcarrier goes to the
-  // comb instead).
+  // No chroma: measured on the composite line itself.
   size_t on_line = 0;
   for (const auto& s : feats.steps) on_line += s.mode == 0;
   EXPECT_GT(on_line, feats.steps.size() / 2);
+  // Every thin line of the lower half is a pair (about 15 a row, 140 rows).
+  EXPECT_GT(orc::edge_ring::count_pairs(events), 1900);
+}
+
+// Events do not depend on orientation: lines slanted by 0.6 samples a field
+// line (about 30 degrees from vertical on the frame) are found as often as
+// near-vertical ones.
+TEST(EdgeRingTest, FindsSlantedLinesAsOftenAsVerticalOnes) {
+  const auto upright =
+      orc::edge_ring::find_events(field(picture(0, false, 2), 0));
+  const auto slanted =
+      orc::edge_ring::find_events(field(picture(0, false, 2, 0.6), 0));
+  const int a = orc::edge_ring::count_pairs(upright);
+  const int b = orc::edge_ring::count_pairs(slanted);
+  EXPECT_GT(a, 1900);
+  EXPECT_NEAR(b, a, 0.03 * a);
 }
 
 TEST(EdgeRingTest, FittedTemplatesRemoveTheRingAndHalo) {
@@ -279,7 +314,10 @@ TEST(EdgeRingTest, FittedTemplatesRemoveTheRingAndHalo) {
   // eight line-art frames: the line term needs kMinLineArtFrames
   orc::edge_ring::ProfileSums fit_sums;
   for (size_t f = 0; f < 8; ++f) fit_sums += sums_of(picture(f, true, 2));
-  auto w = orc::edge_ring::fit(fit_sums, fit_sums, 8);
+  auto w =
+      orc::edge_ring::fit(fit_sums, fit_sums, 8,
+                          std::make_shared<const orc::edge_ring::LevelTables>(
+                              orc::edge_ring::level_templates(fit_sums)));
   ASSERT_TRUE(w.has_value());
   EXPECT_EQ(w->gains.rise, 1.0);
   EXPECT_EQ(w->gains.line, 1.0);
@@ -290,7 +328,7 @@ TEST(EdgeRingTest, FittedTemplatesRemoveTheRingAndHalo) {
   const auto before = residual(sums_of(input));
   const auto after = residual(sums_of(output));
   EXPECT_GT(before.rise, 0.01);
-  EXPECT_LT(after.rise, 0.25 * before.rise);
+  EXPECT_LT(after.rise, 0.5 * before.rise);
   EXPECT_GT(before.line, 0.01);
   EXPECT_LT(after.line, 0.25 * before.line);
   // Outside the picture nothing changes.

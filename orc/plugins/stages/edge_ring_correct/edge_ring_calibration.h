@@ -30,7 +30,9 @@ struct EdgeRingCalibrationOptions {
   // certifying third and a reporting third. Of every probe_stride-th frame
   // of a third, the frames_per_third with the most measurable features, at
   // least min_spacing frames apart, are read.
-  size_t frames_per_third = 12;
+  size_t frames_per_third = 18;
+  // the fit third reads this many (rising edges are sparse on maps)
+  size_t fit_frames = 24;
   size_t probe_stride = 8;
   size_t min_spacing = 6;
 };
@@ -62,8 +64,27 @@ EdgeRingCalibration calibrate_edge_ring(
     const EdgeRingCalibrationOptions& options,
     const EdgeRingCalibrationProgress& progress);
 
-// One window of frames [first, end) given its three thirds' fields (each a
-// list of frame pairs: field 1, field 2).
+// A window's fit third, measured: over all its frames, over its line-art
+// frames, and how many of those there are.
+struct EdgeRingFitSums {
+  edge_ring::ProfileSums all;
+  edge_ring::ProfileSums line_art;
+  int line_art_frames = 0;
+};
+
+// |fields| in frame pairs (field 1, field 2).
+EdgeRingFitSums fit_sums(const std::vector<edge_ring::FieldImage>& fields);
+
+// One window of frames [first, end): fitted on |fit| with the source's
+// pooled rising |levels|, certified on |certify_fields| and reported on
+// |report_fields| (each a list of frame pairs).
+EdgeRingWindowReport calibrate_window(
+    int64_t first, int64_t end, const EdgeRingFitSums& fit,
+    std::shared_ptr<const edge_ring::LevelTables> levels,
+    std::vector<edge_ring::CertifyField> certify_fields,
+    std::vector<edge_ring::CertifyField> report_fields);
+
+// The same, fitted (level templates included) on |fit_fields| alone.
 EdgeRingWindowReport calibrate_window(
     int64_t first, int64_t end,
     const std::vector<edge_ring::FieldImage>& fit_fields,

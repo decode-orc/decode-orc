@@ -36,10 +36,17 @@ std::optional<FrameFields> read_frame(const VideoFrameRepresentation& source,
   if (frame.size() < desc->height * spl || desc->height < 2)
     return std::nullopt;
   const size_t f1 = std::min(field1_lines(VideoSystem::PAL), desc->height);
-  return FrameFields{
+  FrameFields out{
       edge_ring::field_image(frame.data(), spl, 0, f1, black, white),
       edge_ring::field_image(frame.data(), spl, f1, desc->height - f1, black,
                              white)};
+  std::vector<std::pair<uint64_t, uint32_t>> runs;
+  for (const auto& d : source.get_dropout_hints(id)) {
+    runs.emplace_back(d.sample_start, d.sample_count);
+  }
+  edge_ring::mark_dropouts(runs, spl, 0, out.first);
+  edge_ring::mark_dropouts(runs, spl, f1, out.second);
+  return out;
 }
 
 // The frames of one third of [first, end) to read.
@@ -60,7 +67,8 @@ std::vector<int64_t> pick_frames(const VideoFrameRepresentation& source,
   for (size_t k = 0; k < strided.size(); ++k) {
     const auto fields = read_frame(source, base + strided[k], black, white);
     if (!fields) continue;
-    const auto feats = edge_ring::find_features(fields->first, true);
+    const auto feats = edge_ring::measured_features(
+        fields->first, edge_ring::find_events(fields->first));
     score[k] = feats.steps.size() + 0.5 * feats.lines.size();
   }
   std::vector<size_t> order(strided.size());
@@ -83,29 +91,37 @@ std::vector<int64_t> pick_frames(const VideoFrameRepresentation& source,
 
 }  // namespace
 
-EdgeRingWindowReport calibrate_window(int64_t first, int64_t end,
-                                      const std::vector<FieldImage>& fit_fields,
-                                      std::vector<CertifyField> certify_fields,
-                                      std::vector<CertifyField> report_fields) {
-  EdgeRingWindowReport r;
-  r.first_frame = first;
-  r.end_frame = end;
-  // fit fields come in frame pairs
-  edge_ring::ProfileSums sums, line_art;
-  int line_art_frames = 0;
+EdgeRingFitSums fit_sums(const std::vector<FieldImage>& fit_fields) {
+  EdgeRingFitSums out;
   for (size_t k = 0; k + 1 < fit_fields.size(); k += 2) {
     edge_ring::ProfileSums frame;
     for (size_t p = 0; p < 2; ++p) {
       const auto& f = fit_fields[k + p];
-      frame += edge_ring::measure(f, edge_ring::find_features(f, true));
+      const auto events = edge_ring::find_events(f);
+      auto s = edge_ring::measure(f, edge_ring::measured_features(f, events));
+      s.events = static_cast<int>(events.size());
+      s.pairs = edge_ring::count_pairs(events);
+      frame += s;
     }
-    sums += frame;
-    if (frame.lines >= edge_ring::kLineArtLines) {
-      line_art += frame;
-      ++line_art_frames;
+    out.all += frame;
+    if (edge_ring::is_line_art(frame)) {
+      out.line_art += frame;
+      ++out.line_art_frames;
     }
   }
-  auto fitted = edge_ring::fit(sums, line_art, line_art_frames);
+  return out;
+}
+
+EdgeRingWindowReport calibrate_window(
+    int64_t first, int64_t end, const EdgeRingFitSums& fit,
+    std::shared_ptr<const edge_ring::LevelTables> levels,
+    std::vector<CertifyField> certify_fields,
+    std::vector<CertifyField> report_fields) {
+  EdgeRingWindowReport r;
+  r.first_frame = first;
+  r.end_frame = end;
+  auto fitted = edge_ring::fit(fit.all, fit.line_art, fit.line_art_frames,
+                               std::move(levels));
   const edge_ring::WindowCorrection* chosen = nullptr;
   if (fitted && !certify_fields.empty()) {
     r.fitted = true;
@@ -136,6 +152,17 @@ EdgeRingWindowReport calibrate_window(int64_t first, int64_t end,
   return r;
 }
 
+EdgeRingWindowReport calibrate_window(int64_t first, int64_t end,
+                                      const std::vector<FieldImage>& fit_fields,
+                                      std::vector<CertifyField> certify_fields,
+                                      std::vector<CertifyField> report_fields) {
+  const auto fit = fit_sums(fit_fields);
+  return calibrate_window(first, end, fit,
+                          std::make_shared<const edge_ring::LevelTables>(
+                              edge_ring::level_templates(fit.all)),
+                          std::move(certify_fields), std::move(report_fields));
+}
+
 EdgeRingCalibration calibrate_edge_ring(
     const VideoFrameRepresentation& source, const EdgeRingCalibrationOptions& o,
     const EdgeRingCalibrationProgress& progress) {
@@ -151,33 +178,50 @@ EdgeRingCalibration calibrate_edge_ring(
   const int64_t nw =
       std::max<int64_t>(1, count / std::max<int64_t>(1, o.window_frames));
   std::vector<edge_ring::WindowCorrection> accepted;
+  auto window_of = [&](int64_t k) {
+    return std::pair<int64_t, int64_t>{k * count / nw, (k + 1) * count / nw};
+  };
+  auto read_third = [&](int64_t k, int third) {
+    std::vector<FieldImage> fields;
+    const auto [first, end] = window_of(k);
+    auto opts = o;
+    if (third == 0) opts.frames_per_third = o.fit_frames;
+    for (int64_t f :
+         pick_frames(source, base, first, end, third, opts, black, white)) {
+      auto pair = read_frame(source, base + f, black, white);
+      if (!pair) continue;
+      fields.push_back(std::move(pair->first));
+      fields.push_back(std::move(pair->second));
+    }
+    return fields;
+  };
+  // pass 1: every window's fit third; the rising templates per level bin are
+  // pooled over all of them
+  std::vector<EdgeRingFitSums> fits;
   for (int64_t k = 0; k < nw; ++k) {
-    const int64_t first = k * count / nw;
-    const int64_t end = (k + 1) * count / nw;
-    if (progress && !progress(static_cast<int>(100 * k / nw),
-                              "Window " + std::to_string(k + 1) + " of " +
-                                  std::to_string(nw))) {
+    if (progress && !progress(static_cast<int>(30 * k / nw),
+                              "Fitting window " + std::to_string(k + 1) +
+                                  " of " + std::to_string(nw))) {
       return EdgeRingCalibration{};
     }
-    std::vector<FieldImage> fit_fields;
-    std::vector<CertifyField> certify_fields, report_fields;
-    for (int third = 0; third < 3; ++third) {
-      for (int64_t f :
-           pick_frames(source, base, first, end, third, o, black, white)) {
-        auto fields = read_frame(source, base + f, black, white);
-        if (!fields) continue;
-        if (third == 0) {
-          fit_fields.push_back(std::move(fields->first));
-          fit_fields.push_back(std::move(fields->second));
-        } else {
-          auto& to = third == 1 ? certify_fields : report_fields;
-          to.emplace_back(std::move(fields->first));
-          to.emplace_back(std::move(fields->second));
-        }
-      }
+    fits.push_back(fit_sums(read_third(k, 0)));
+  }
+  edge_ring::ProfileSums pooled;
+  for (const auto& f : fits) pooled += f.all;
+  const auto levels = std::make_shared<const edge_ring::LevelTables>(
+      edge_ring::level_templates(pooled));
+  for (int64_t k = 0; k < nw; ++k) {
+    if (progress && !progress(static_cast<int>(30 + 70 * k / nw),
+                              "Certifying window " + std::to_string(k + 1) +
+                                  " of " + std::to_string(nw))) {
+      return EdgeRingCalibration{};
     }
+    std::vector<CertifyField> certify_fields, report_fields;
+    for (auto& f : read_third(k, 1)) certify_fields.emplace_back(std::move(f));
+    for (auto& f : read_third(k, 2)) report_fields.emplace_back(std::move(f));
+    const auto [first, end] = window_of(k);
     auto r =
-        calibrate_window(base + first, base + end, fit_fields,
+        calibrate_window(base + first, base + end, fits[k], levels,
                          std::move(certify_fields), std::move(report_fields));
     if (r.accepted) accepted.push_back(r.chosen);
     out.windows.push_back(std::move(r));

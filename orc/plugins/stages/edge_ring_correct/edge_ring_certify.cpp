@@ -165,6 +165,7 @@ FrameMeasures frame_measures(const ProfileSums& p, const FlatStats& flat) {
     out.v[name + "_tail"] = {ok ? mean_over(t, m, 3, 8) : kNaN, n};
   };
   steps(p.rise_sum, p.rise_count, p.rises, "rise");
+  steps(p.fill_sum, p.fill_count, p.fills, "fill");
   steps(p.fall_sum, p.fall_count, p.falls, "fall");
   coarse(p.line_sum, p.line_count, 0.0, t, m);
   const bool ok = p.lines >= kMinFrameFeatures;
@@ -210,9 +211,11 @@ FlatStats operator+(FlatStats a, const FlatStats& b) {
 }  // namespace
 
 CertifyField::CertifyField(FieldImage field) : field_(std::move(field)) {
-  correction_ = find_features(field_, false);
-  measured_ = find_features(field_, true);
+  events_ = find_events(field_);
+  measured_ = measured_features(field_, events_);
   before_ = measure(field_, measured_);
+  before_.events = static_cast<int>(events_.size());
+  before_.pairs = count_pairs(events_);
   luma_before_ = comb_luma(field_);
   const FieldImage smooth = blur(luma_before_, 0.7, 2.0);
   const int rows = field_.rows, width = field_.width;
@@ -265,9 +268,10 @@ FlatStats CertifyField::flat_stats(const FieldImage& luma) const {
 }
 
 std::pair<ProfileSums, FlatStats> CertifyField::after(
-    const WindowCorrection& window, const Gains& gains) const {
+    const WindowCorrection& window, const Gains& gains, bool line_art) const {
   FieldImage out = field_;
-  apply(field_, correction_, window.templates, gains, out);
+  apply(correction_features(field_, events_, pair_mode(line_art, gains)),
+        window, gains, out);
   return {measure(out, measured_), flat_stats(comb_luma(out))};
 }
 
@@ -284,6 +288,7 @@ Comparison compare(const std::vector<CertifyField>& fields,
       pb += f.before();
       fb = fb + f.flat_before();
       c.rises += f.before().rises;
+      c.fills += f.before().fills;
       c.falls += f.before().falls;
       c.lines += f.before().lines;
       if (window == nullptr) {
@@ -291,23 +296,42 @@ Comparison compare(const std::vector<CertifyField>& fields,
         fa = fa + f.flat_before();
         continue;
       }
-      const bool line_art =
-          fields[2 * k].before().lines + fields[2 * k + 1].before().lines >=
-          kLineArtLines;
+      ProfileSums frame = fields[2 * k].before();
+      frame += fields[2 * k + 1].before();
+      const bool line_art = is_line_art(frame);
       Gains g =
           window->adapt
               ? frame_gains(*window, fields[2 * k + 1 - p].before(), line_art)
               : window->gains;
       if (!line_art) g.line = 0.0;
-      const auto [s, fl] = f.after(*window, g);
+      const auto [s, fl] = f.after(*window, g, line_art);
       pa += s;
       fa = fa + fl;
     }
-    if (pb.lines >= kLineArtLines) ++c.line_art_frames;
+    if (is_line_art(pb)) ++c.line_art_frames;
     before.push_back(frame_measures(pb, fb));
     after.push_back(frame_measures(pa, fa));
   }
   if (frames == 0) return c;
+  // per frame: the summed change of the edge measures it has
+  int with_edges = 0, improved = 0;
+  for (size_t k = 0; k < frames; ++k) {
+    double sum = 0.0;
+    bool any = false;
+    for (const char* name : kEdgeMeasures) {
+      const double b = before[k].v.at(name).first;
+      const double a = after[k].v.at(name).first;
+      if (std::isfinite(a - b)) {
+        sum += a - b;
+        any = true;
+      }
+    }
+    if (any) {
+      ++with_edges;
+      improved += sum < 0.0;
+    }
+  }
+  c.frame_share = with_edges ? static_cast<double>(improved) / with_edges : 0.0;
   const std::vector<double> ones(frames, 1.0);
   const auto pb = aggregate(before, ones);
   const auto pa = aggregate(after, ones);
@@ -353,12 +377,18 @@ Certificate certify(const std::vector<CertifyField>& fields,
   cert.comparison = compare(fields, &window, 1);
   const auto& c = cert.comparison;
   const bool measurable_rise = c.rises >= kMinSteps;
+  const bool measurable_fill = c.fills >= kMinSteps;
   const bool measurable_fall = c.falls >= kMinSteps;
   const bool measurable_line = c.lines >= kMinLines;
-  if (window.gains.rise != 0 && !measurable_rise)
-    cert.reasons.push_back("rising steps not measured");
-  if (window.gains.fall != 0 && !measurable_fall)
+  if (window.gains.rise != 0 && !measurable_rise) {
+    cert.reasons.push_back("isolated rising steps not measured");
+  }
+  if (window.gains.fill != 0 && !measurable_fill) {
+    cert.reasons.push_back("fill-edge rising steps not measured");
+  }
+  if (window.gains.fall != 0 && !measurable_fall) {
     cert.reasons.push_back("falling steps not measured");
+  }
   if (window.gains.line != 0 && !measurable_line)
     cert.reasons.push_back("thin lines not measured");
   if (window.gains.line != 0 && c.line_art_frames < kMinLineArtFrames) {
@@ -368,6 +398,7 @@ Certificate certify(const std::vector<CertifyField>& fields,
   for (const char* name : kEdgeMeasures) {
     const std::string n(name);
     const bool ok = n.rfind("rise", 0) == 0   ? measurable_rise
+                    : n.rfind("fill", 0) == 0 ? measurable_fill
                     : n.rfind("fall", 0) == 0 ? measurable_fall
                                               : measurable_line;
     if (!ok) continue;
@@ -385,27 +416,31 @@ Certificate certify(const std::vector<CertifyField>& fields,
     cert.reasons.push_back("nothing measurable");
   } else if (!(c.gain_bound < -kMinGain)) {
     cert.reasons.push_back("no certain gain");
+  } else if (c.frame_share < kMinFrameShare) {
+    cert.reasons.push_back("better on too few frames");
   }
   cert.accepted = cert.reasons.empty();
   return cert;
 }
 
 std::vector<WindowCorrection> candidates(const WindowCorrection& fitted) {
-  std::vector<std::array<bool, 3>> subsets;
-  const bool has[3] = {fitted.gains.rise != 0, fitted.gains.fall != 0,
-                       fitted.gains.line != 0};
-  for (int size = 3; size >= 1; --size) {
-    // combinations of the present components in order, as itertools does
-    std::vector<int> present;
-    for (int k = 0; k < 3; ++k) {
-      if (has[k]) present.push_back(k);
-    }
-    const int n = static_cast<int>(present.size());
-    if (size > n) continue;
+  // components in the order rise, fall, line, fill; every non-empty subset of
+  // those fitted, largest first, in itertools.combinations order
+  constexpr int kComponents = 4;
+  const bool has[kComponents] = {fitted.gains.rise != 0, fitted.gains.fall != 0,
+                                 fitted.gains.line != 0,
+                                 fitted.gains.fill != 0};
+  std::vector<int> present;
+  for (int k = 0; k < kComponents; ++k) {
+    if (has[k]) present.push_back(k);
+  }
+  const int n = static_cast<int>(present.size());
+  std::vector<std::array<bool, kComponents>> subsets;
+  for (int size = n; size >= 1; --size) {
     std::vector<int> idx(size);
     for (int k = 0; k < size; ++k) idx[k] = k;
     while (true) {
-      std::array<bool, 3> s{false, false, false};
+      std::array<bool, kComponents> s{};
       for (int k : idx) s[present[k]] = true;
       subsets.push_back(s);
       int k = size - 1;
@@ -422,8 +457,8 @@ std::vector<WindowCorrection> candidates(const WindowCorrection& fitted) {
     for (const auto& s : subsets) {
       WindowCorrection w = fitted;
       w.adapt = adapt;
-      w.gains =
-          Gains{s[0] ? scale : 0.0, s[1] ? scale : 0.0, s[2] ? scale : 0.0};
+      w.gains = Gains{s[0] ? scale : 0.0, s[1] ? scale : 0.0,
+                      s[2] ? scale : 0.0, s[3] ? scale : 0.0};
       out.push_back(w);
     }
   }

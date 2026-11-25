@@ -52,9 +52,14 @@ RingCorrectedVideoFrameRepresentation::build_corrected(FrameID id) const {
     return std::make_shared<const std::vector<int16_t>>(std::move(frame));
   }
   frame.assign(input, input + desc->samples_total);
+  // no correction on or measurement across the capture's dropouts
+  std::vector<std::pair<uint64_t, uint32_t>> dropouts;
+  for (const auto& d : source_->get_dropout_hints(id)) {
+    dropouts.emplace_back(d.sample_start, d.sample_count);
+  }
   if (!edge_ring::correct_frame(
           input, frame.data(), desc->samples_per_line_nominal, desc->height,
-          params->black_level, params->white_level, *window)) {
+          params->black_level, params->white_level, *window, dropouts)) {
     frame.clear();
   }
   return std::make_shared<const std::vector<int16_t>>(std::move(frame));
