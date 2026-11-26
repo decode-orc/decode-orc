@@ -361,7 +361,6 @@ Features correction_features(const FieldImage& field,
   Features out;
   if (e.empty()) return out;
   const FieldImage yn = notch(field);
-  const FieldImage yc = comb(field);
   for (size_t k = 0; k < e.size();) {
     const bool pair = is_pair(e, k);
     const size_t last = pair ? k + 1 : k;
@@ -414,7 +413,8 @@ Features correction_features(const FieldImage& field,
       const bool chroma_free =
           subcarrier_amplitude(line, ic - 30, ic - 6) < kMaxGroundChroma &&
           subcarrier_amplitude(line, ic + 18, ic + 34) < kMaxGroundChroma;
-      s.first = ptp(chroma_free ? line : yc.row(r), ic - 14, ic - 5);
+      // on the comb the class is always isolated (see measured_features)
+      s.first = chroma_free ? ptp(line, ic - 14, ic - 5) : 0.0;
     }
     out.steps.push_back(s);
     ++k;
@@ -534,7 +534,10 @@ Features measured_features(const FieldImage& f, const std::vector<Event>& e) {
             s.size = sp;
             s.mode = mode;
             s.event_step = e[k].step;
-            s.edge_class = rise && !flat ? 1 : 0;
+            // on the comb (chroma areas) an edge is always isolated-class: its
+            // rows r +- 2 are mixed in, and a per-row class could correct some
+            // rows of one edge and not others
+            s.edge_class = rise && mode == 0 && !flat ? 1 : 0;
             s.bin = level_bin(lo, hi);
             out.steps.push_back(s);
           }
