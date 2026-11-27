@@ -714,6 +714,127 @@ TEST(FrameMapStageTest, Execute_SecamPadsAGapInTheTwoFrameCycle) {
   EXPECT_EQ(out, (std::vector<uint64_t>{0, 1, UINT64_MAX, 2, 3}));
 }
 
+// ── Edits follow the capture, not the range specification ──────────────────
+
+namespace {
+
+// Runs a Frame Map over a PAL mock source whose frames read the given colour
+// frame indices, and returns the output: each source frame number, or
+// UINT64_MAX for a pad.
+std::vector<uint64_t> run_pal_map(
+    const std::map<uint64_t, int32_t>& cfi, uint64_t frames,
+    const std::map<std::string, orc::ParameterValue>& parameters) {
+  FixedPhaseService service(cfi);
+  orc::OrcPluginServices services{};
+  services.observation_service = &service;
+  services.services_size = static_cast<uint32_t>(sizeof(services));
+  orc::plugin::set_services(&services);
+
+  auto source = make_navigable_source(frames);
+  ON_CALL(*source, get_frame_descriptor(::testing::_))
+      .WillByDefault(::testing::Invoke([](orc::FrameID id) {
+        orc::FrameDescriptor d;
+        d.frame_id = id;
+        d.system = orc::VideoSystem::PAL;
+        d.height = 625;
+        d.samples_total = 5000 + static_cast<size_t>(id);  // marks the frame
+        d.samples_per_line_nominal = 1135;
+        return std::optional<orc::FrameDescriptor>(d);
+      }));
+
+  orc::FrameMapStage stage;
+  orc::ObservationContext ctx;
+  const auto outputs = stage.execute({as_artifact(source)}, parameters, ctx);
+  orc::plugin::set_services(nullptr);
+  std::vector<uint64_t> result;
+  if (outputs.size() != 1) return result;
+  const auto mapped =
+      std::dynamic_pointer_cast<const orc::VideoFrameRepresentation>(
+          outputs[0]);
+  if (!mapped) return result;
+  for (uint64_t i = 0; i < mapped->frame_count(); ++i) {
+    const auto desc = mapped->get_frame_descriptor(orc::FrameID{i});
+    if (!desc) return {};
+    result.push_back(desc->is_padding_frame ? UINT64_MAX
+                                            : desc->samples_total - 5000);
+  }
+  return result;
+}
+
+// A capture that opens by playing pictures, scans back and plays them again:
+// frames 0-7 and 8-15 each read an unbroken PAL sequence, but the second
+// pass does not continue the first, and frame 2, read during the scan, stands
+// in for frame 10 with another index.
+const std::map<uint64_t, int32_t> kReplayedCapture = {
+    {0, 3}, {1, 4}, {2, 1},  {3, 2},  {4, 3},  {5, 4},  {6, 1},  {7, 2},
+    {8, 1}, {9, 2}, {10, 3}, {11, 4}, {12, 1}, {13, 2}, {14, 3}, {15, 4}};
+
+}  // namespace
+
+// The Disc Mapper puts the cleaner copy of a picture in its place from
+// wherever the capture holds it, and pads missing pictures itself (PAD_N).
+// The copy's colour frame index need not continue its neighbours' (here
+// frame 2 reads 1 where 3 would follow), and padding there pushed every
+// later frame out of place: on a 12-capture Domesday side one capture was
+// left 8 pictures behind the others for the rest of the side.
+TEST(FrameMapStageTest, Execute_PadGapsLeavesAFramePlacedByTheRangesAlone) {
+  const auto out =
+      run_pal_map(kReplayedCapture, 16,
+                  {{"ranges", std::string("8,9,2,11-15")}, {"pad_gaps", true}});
+  EXPECT_EQ(out, (std::vector<uint64_t>{8, 9, 2, 11, 12, 13, 14, 15}));
+}
+
+// Two placed frames whose indices happen to match were never consecutive in
+// the capture, so the second is not a repeat of the first.
+TEST(FrameMapStageTest, Execute_RemoveDuplicatesKeepsAFramePlacedByTheRanges) {
+  // Frame 6 (index 1) placed after frame 12 (index 1).
+  const auto out = run_pal_map(
+      kReplayedCapture, 16,
+      {{"ranges", std::string("11,12,6,14,15")}, {"remove_duplicates", true}});
+  EXPECT_EQ(out, (std::vector<uint64_t>{11, 12, 6, 14, 15}));
+}
+
+// Within a range, and where a range starts on the frame after the previous
+// one, the frames follow one another in the capture: a skip is still padded
+// and a repeat still removed.
+TEST(FrameMapStageTest, Execute_EditsStillApplyWithinTheCapturesRuns) {
+  // Frame 10 reads 4 after frame 9's 2: the player skipped one frame.
+  std::map<uint64_t, int32_t> skipped = kReplayedCapture;
+  skipped[10] = 4;
+  skipped[11] = 1;
+  skipped[12] = 2;
+  const std::vector<uint64_t> padded = {8, 9, kPad, 10, 11, 12};
+  EXPECT_EQ(run_pal_map(skipped, 16,
+                        {{"ranges", std::string("8-12")}, {"pad_gaps", true}}),
+            padded);
+  EXPECT_EQ(
+      run_pal_map(skipped, 16,
+                  {{"ranges", std::string("8-9,10-12")}, {"pad_gaps", true}}),
+      padded);
+
+  // Frame 11 repeats frame 10's index 3: the player hesitated.
+  std::map<uint64_t, int32_t> repeated = kReplayedCapture;
+  repeated[11] = 3;
+  repeated[12] = 4;
+  EXPECT_EQ(run_pal_map(repeated, 16,
+                        {{"ranges", std::string("9-10,11-12")},
+                         {"remove_duplicates", true}}),
+            (std::vector<uint64_t>{9, 10, 12}));
+}
+
+// After a removed repeat, a frame the ranges place next is still not
+// compared with the frame kept before it.
+TEST(FrameMapStageTest, Execute_FramePlacedAfterARemovedRepeatIsLeftAlone) {
+  std::map<uint64_t, int32_t> repeated = kReplayedCapture;
+  repeated[11] = 3;  // frame 11 repeats frame 10
+  // Frame 3 (index 2) after frame 10 (index 3) would read as a skip of two.
+  EXPECT_EQ(run_pal_map(repeated, 16,
+                        {{"ranges", std::string("9-11,3")},
+                         {"remove_duplicates", true},
+                         {"pad_gaps", true}}),
+            (std::vector<uint64_t>{9, 10, 3}));
+}
+
 // ── execute() reuses an unchanged run ───────────────────────────────────────
 
 // Every DAG execution calls execute() again. A new wrapper each time looked

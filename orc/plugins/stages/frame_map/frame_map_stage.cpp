@@ -364,8 +364,9 @@ std::vector<std::pair<uint64_t, uint64_t>> FrameMapStage::parse_ranges(
 
 std::vector<FrameID> FrameMapStage::build_frame_mapping(
     const std::vector<std::pair<uint64_t, uint64_t>>& ranges,
-    const VideoFrameRepresentation& source) {
+    const VideoFrameRepresentation& source, std::vector<bool>* follows) {
   std::vector<FrameID> mapping;
+  if (follows) follows->clear();
   FrameIDRange src_range = source.frame_range();
   uint64_t src_end = src_range.last;
 
@@ -380,6 +381,7 @@ std::vector<FrameID> FrameMapStage::build_frame_mapping(
       // PAD_N: insert e padding slots
       for (uint64_t i = 0; i < e; ++i) {
         mapping.push_back(FrameID{UINT64_MAX});
+        if (follows) follows->push_back(false);
       }
       continue;
     }
@@ -393,10 +395,21 @@ std::vector<FrameID> FrameMapStage::build_frame_mapping(
       }
       skipped += e - range_first_skipped + 1;
     }
+    // A range follows on from the frame before it only where it continues
+    // that frame's run in the capture; a range that starts elsewhere is a
+    // frame the specification placed there.
+    bool in_range = false;
     for (uint64_t id = s; id <= last; ++id) {
       FrameID fid{id};
       if (source.has_frame(fid)) {
+        if (follows) {
+          const bool continues = !mapping.empty() &&
+                                 mapping.back() != FrameID{UINT64_MAX} &&
+                                 mapping.back() + 1 == id;
+          follows->push_back(in_range || continues);
+        }
         mapping.push_back(fid);
+        in_range = true;
       }
     }
   }
@@ -421,27 +434,39 @@ bool FrameMapStage::source_has_colour_sequence(
 }
 
 size_t FrameMapStage::apply_remove_duplicates(
-    std::vector<FrameID>& mapping, const VideoFrameRepresentation& source) {
+    std::vector<FrameID>& mapping, std::vector<bool>& follows,
+    const VideoFrameRepresentation& source) {
   // One pass into a new table: each frame is compared with the last frame
   // kept, which is the pair the removal leaves adjacent. Erasing in place
   // moved the rest of the table on every removal.
   std::vector<FrameID> kept;
+  std::vector<bool> kept_follows;
   kept.reserve(mapping.size());
+  kept_follows.reserve(mapping.size());
   size_t removed = 0;
   // The colour frame index of kept.back(), measured once per kept frame.
   int kept_cfi = -1;
   bool kept_cfi_known = false;
-  for (const FrameID cur : mapping) {
+  // A frame that follows a removed repeat follows the frame repeated, so
+  // follows[i] still holds against kept.back().
+  for (size_t i = 0; i < mapping.size(); ++i) {
+    const FrameID cur = mapping[i];
+    const bool cur_follows = follows[i];
     if (kept.empty()) {
       kept.push_back(cur);
+      kept_follows.push_back(cur_follows);
       kept_cfi_known = false;
       continue;
     }
     const FrameID prev = kept.back();
 
-    // Skip padding frames in comparison
-    if (prev == FrameID{UINT64_MAX} || cur == FrameID{UINT64_MAX}) {
+    // Skip padding frames in comparison, and a frame the range specification
+    // placed after one it does not follow in the capture: the two were never
+    // consecutive, so matching indices are not a repeat.
+    if (prev == FrameID{UINT64_MAX} || cur == FrameID{UINT64_MAX} ||
+        !cur_follows) {
       kept.push_back(cur);
+      kept_follows.push_back(cur_follows);
       kept_cfi_known = false;
       continue;
     }
@@ -463,10 +488,12 @@ size_t FrameMapStage::apply_remove_duplicates(
       ++removed;
     } else {
       kept.push_back(cur);
+      kept_follows.push_back(cur_follows);
       kept_cfi = cur_cfi;
     }
   }
   mapping = std::move(kept);
+  follows = std::move(kept_follows);
   return removed;
 }
 
@@ -492,7 +519,7 @@ int FrameMapStage::next_colour_index(int current, VideoSystem sys) {
 }
 
 size_t FrameMapStage::apply_pad_gaps(
-    std::vector<FrameID>& mapping,
+    std::vector<FrameID>& mapping, const std::vector<bool>& follows,
     std::vector<FrameMappedRepresentation::PaddingDescriptor>& pads,
     const VideoFrameRepresentation& source, std::string& gap_positions_out) {
   size_t total_inserted = 0;
@@ -532,7 +559,13 @@ size_t FrameMapStage::apply_pad_gaps(
     }
     const FrameID prev_fid = mapping[i - 1];
 
-    if (prev_fid == FrameID{UINT64_MAX} || cur_fid == FrameID{UINT64_MAX}) {
+    // A frame the range specification placed after one it does not follow
+    // in the capture is not a skip by the player: the Disc Mapper puts the
+    // best copy of a picture in its place from wherever the capture holds
+    // it, and pads the pictures it lacks itself (PAD_N).  Padding there
+    // would push every later frame out of place.
+    if (prev_fid == FrameID{UINT64_MAX} || cur_fid == FrameID{UINT64_MAX} ||
+        !follows[i]) {
       padded.push_back(cur_fid);
       continue;
     }
@@ -672,8 +705,10 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
 
   // Build initial frame mapping from range specification
   std::vector<FrameID> mapping;
+  // Whether each frame follows the one before it in the capture.
+  std::vector<bool> follows;
   if (!config.range_spec.empty() && !config.ranges.empty()) {
-    mapping = build_frame_mapping(config.ranges, *source);
+    mapping = build_frame_mapping(config.ranges, *source, &follows);
     if (mapping.empty()) {
       ORC_LOG_WARN("FrameMapStage: range spec produced empty mapping");
       cached_output_ = source;
@@ -688,6 +723,7 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
         mapping.push_back(fid);
       }
     }
+    follows.assign(mapping.size(), true);
   }
 
   // Both edits follow the measured colour sequence, which a source that is
@@ -712,7 +748,7 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
   // Duplicate frame removal
   size_t removed_count = 0;
   if (remove_duplicates) {
-    removed_count = apply_remove_duplicates(mapping, *source);
+    removed_count = apply_remove_duplicates(mapping, follows, *source);
     ORC_LOG_DEBUG("FrameMapStage: removed {} duplicate frame(s)",
                   removed_count);
   }
@@ -722,7 +758,8 @@ std::vector<ArtifactPtr> FrameMapStage::execute(
   size_t padded_count = 0;
   std::string gap_positions;
   if (pad_gaps) {
-    padded_count = apply_pad_gaps(mapping, pads, *source, gap_positions);
+    padded_count =
+        apply_pad_gaps(mapping, follows, pads, *source, gap_positions);
     ORC_LOG_DEBUG("FrameMapStage: inserted {} padding frame(s) into {} gap(s)",
                   padded_count, gap_positions.empty() ? 0 : 1);
   }
