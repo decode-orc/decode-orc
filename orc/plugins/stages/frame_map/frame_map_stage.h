@@ -233,10 +233,15 @@ class FrameMapStage : public DAGStage,
   static std::vector<std::pair<uint64_t, uint64_t>> parse_ranges(
       const std::string& spec);
 
-  // Build the output frame_mapping vector from a parsed range list.
+  // Build the output frame_mapping vector from a parsed range list.  When
+  // |follows| is given it receives, per entry, whether that frame follows the
+  // one before it in the capture: true within a range (frames the source
+  // lacks are skipped over) and where a range starts on the frame after the
+  // previous one; false for padding and for a range that starts elsewhere.
   static std::vector<FrameID> build_frame_mapping(
       const std::vector<std::pair<uint64_t, uint64_t>>& ranges,
-      const VideoFrameRepresentation& source);
+      const VideoFrameRepresentation& source,
+      std::vector<bool>* follows = nullptr);
 
   // False when the source declares it is not subcarrier phase locked, which
   // leaves every colour_frame_index unknown.  A SECAM source always has one:
@@ -245,15 +250,20 @@ class FrameMapStage : public DAGStage,
       const VideoFrameRepresentation& source);
 
   // Apply duplicate-frame removal: when two consecutive frames share the same
-  // colour_frame_index, drop the second.  Returns removed-count.
+  // colour_frame_index, drop the second.  Only frames that follow one another
+  // in the capture (|follows|, one entry per frame of |mapping|, kept in step
+  // with it) are compared.  Returns removed-count.
   static size_t apply_remove_duplicates(std::vector<FrameID>& mapping,
+                                        std::vector<bool>& follows,
                                         const VideoFrameRepresentation& source);
 
   // Detect gaps in the colour_frame_index sequence and insert padding frames.
-  // Returns number of padding frames inserted; fills padding_descriptors_out.
-  // Padding frames always render black.
+  // Only frames that follow one another in the capture (|follows|, one entry
+  // per frame of |mapping|) are compared.  Returns number of padding frames
+  // inserted; fills padding_descriptors_out.  Padding frames always render
+  // black.
   static size_t apply_pad_gaps(
-      std::vector<FrameID>& mapping,
+      std::vector<FrameID>& mapping, const std::vector<bool>& follows,
       std::vector<FrameMappedRepresentation::PaddingDescriptor>& pads,
       const VideoFrameRepresentation& source, std::string& gap_positions_out);
 
