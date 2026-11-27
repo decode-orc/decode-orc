@@ -1328,6 +1328,27 @@ TEST(StackerStageTest, SampleAlign_HoldsTheNearestMeasuredSegment) {
   EXPECT_EQ(stacked->sample_offsets(orc::FrameID{2 * kSegment + 1})[1], 5);
 }
 
+// However far away the nearest measured segment is: a long run of held black
+// stills must not leave a source uncorrected (offset 0), which puts its
+// subcarrier tens of degrees off the others'.
+TEST(StackerStageTest, SampleAlign_HoldsAMeasuredSegmentFarAway) {
+  constexpr size_t kSegment =
+      orc::StackedVideoFrameRepresentation::kSampleAlignSegmentFrames;
+  constexpr size_t kSegments = 8;
+  orc::StackerStage stage;
+  auto reference = synthetic(kSegments * kSegment, composite_picture(0, 1));
+  auto source = std::make_shared<FakeSyntheticPalSource>(
+      kSegments * kSegment,
+      std::vector<std::pair<size_t, Picture>>{{0, composite_picture(-3, 2)},
+                                              {kSegment, flat_picture()}});
+
+  auto stacked = stack_of(stage, {reference, source});
+  ASSERT_NE(stacked, nullptr);
+
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{5 * kSegment})[1], 3);
+  EXPECT_EQ(stacked->sample_offsets(orc::FrameID{7 * kSegment + 1})[1], 3);
+}
+
 // One input's field 2 holds a different picture, as a mid-frame player skip
 // leaves it. That field is left out, and the same input's field 1 is still
 // stacked: its +30 offset lifts the field 1 mean by 10.

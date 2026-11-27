@@ -52,8 +52,10 @@ namespace {
 constexpr size_t kAlignProbeFrames = 4;
 constexpr size_t kAlignProbeCandidates = 8;
 
-// How many segments either side a segment that cannot be measured looks for
-// a measured one to hold the offset from.
+// How many segments either side a segment whose noise cannot be measured
+// looks for a measured one to hold the noise from.  (A sample-grid offset is
+// held from the nearest measured segment at any distance: see
+// sample_offsets().)
 constexpr size_t kMaxSegmentSearch = 4;
 
 // A source's grid is logged again only when the offset applied to it moves by
@@ -1399,8 +1401,16 @@ std::vector<double> StackedVideoFrameRepresentation::sample_offsets(
       continue;
     }
     // Hold the offset from the nearest segment that could be measured,
-    // earlier first on a tie.
-    for (size_t distance = 1; distance <= kMaxSegmentSearch; ++distance) {
+    // earlier first on a tie, however far away it is.  A grid drifts by a
+    // sample or so over a whole side, so a held offset is closer than none,
+    // which leaves the source out by its full offset.  On Community North
+    // a capture 1.15 samples off was left uncorrected through 4,500 frames
+    // of held black stills, with nothing to correlate and the nearest
+    // measured segment 5 to 9 segments away: its burst sat 104° from the
+    // others', the colour-field check left it out of every line, and the
+    // stack lost the only capture of one master, 29 % of the weight, for
+    // 19 % more noise.
+    for (size_t distance = 1; distance < segments; ++distance) {
       std::optional<double> held;
       if (segment >= distance) held = segment_offsets(segment - distance)[i];
       if (!held && segment + distance < segments) {
