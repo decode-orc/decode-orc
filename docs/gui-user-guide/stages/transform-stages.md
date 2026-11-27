@@ -541,6 +541,8 @@ It works on the composite, before the chroma decoder: the ring is a 5 MHz luma o
 
 Templates stop 12 samples before the next edge on the line (1.5 between thin lines on line-art frames), dense texture such as stipple and hatching is left alone, and nothing is found on or measured across the capture's dropouts. Only the samples after an edge change; everything else, flat areas included, passes **bit-identical**, as does every frame outside a certified window.
 
+The calibration assumes the ring stays the same through a window. If the input's response changes part-way through (for example a decoder equaliser that switches during the window), one template fits neither state and certification leaves that part uncorrected.
+
 **Parameters**
 
 * `ring_track` (string)

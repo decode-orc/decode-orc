@@ -20,6 +20,8 @@ The ring is a luma-band oscillation of about 5 MHz, which in the composite lies 
 
 A template never reaches the next feature's measured region: it stops 12 samples before the next step, and 1.5 samples before the next thin line on line-art frames (lettering strokes, close parallel lines; elsewhere 12, as thin lines there are left alone). A feature with more than 3 events in the 24 samples after it — stipple, hatching — is left alone, so fills are not mottled; the edge of a fill onto clean paper is still corrected. Falling-edge and line gains are scaled per frame by the frame's own measured excess (lines at most 1). Nothing else changes: flat areas, blanking, sync, burst and VBI lines are untouched, and a frame in no certified window passes **bit-identical**. Only PAL composite sources are processed; any other source passes through with a warning.
 
+The calibration assumes the ring stays the same through a window. Where the input's response changes part-way through a window — for example a decoder that switches its own equaliser on, off or to new settings every few seconds — one template per window fits neither state; certification then refuses that component, and the window is corrected only for what still fits.
+
 ## Parameters
 
 ### ring_track (string)
