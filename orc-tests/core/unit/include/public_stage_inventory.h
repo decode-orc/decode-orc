@@ -103,6 +103,11 @@ inline const std::vector<PublicStageSpec>& public_stage_specs() {
        [] {
          return orc::StageRegistry::instance().create_stage("fm_beat_cancel");
        }},
+      {"edge_ring_correct", PublicStageFamily::Transform, true,
+       [] {
+         return orc::StageRegistry::instance().create_stage(
+             "edge_ring_correct");
+       }},
       {"channel_equalise", PublicStageFamily::Transform, true,
        [] {
          return orc::StageRegistry::instance().create_stage("channel_equalise");

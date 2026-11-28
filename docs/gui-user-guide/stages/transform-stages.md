@@ -515,6 +515,46 @@ On a videosynth pressing with a −24 dB beat and the Domesday capture noise, th
 
 ---
 
+## Edge Ring Correct
+
+| | |
+|-|-|
+| **Stage id** | `edge_ring_correct` |
+| **Stage name** | Edge Ring Correct |
+| **Connections** | 1 input → 1 output (fan-out supported) |
+| **Formats** | PAL only |
+| **Purpose** | Remove the ring after sharp edges and the white halo after thin dark lines of PAL LaserDisc pictures, where certified better |
+
+**Use this stage when:**
+
+* A PAL LaserDisc source shows a dark dip a few samples after black-to-white edges, or a white halo right of the dark lines of maps and line drawings. The Domesday Community sides carry both.
+* Run its **Edge Ring Calibration** tool first (below); it writes `ring_track`. Windows it cannot certify stay uncorrected, so on a source without the ring the track stays empty and the stage changes nothing.
+* Place it after the Stacker, Dropout Correction and Channel Equalise, before the Video Sink.
+
+**What it does**
+
+It works on the composite, before the chroma decoder: the ring is a 5 MHz luma oscillation that in the composite lies in the chroma band, so removing it there removes both its luma and its cross-colour. Every sharp transition of at least 12 IRE is found on a notched copy of the line (zeros at the subcarrier and half the sample rate), so vertical, slanted and curved edges and lettering are treated alike, and a template is subtracted at each one, scaled by its step:
+
+* falling edges: the window's measured template;
+* rising edges: a template per start level, end level and edge class (isolated, or the edge of a grey or textured fill), because the player's response is level-dependent; shapes are pooled over the source, gains certified per window;
+* thin dark lines, on line-art frames (maps, line drawings, text pages) only: a template of their halo, measured from their rising edge.
+
+Templates stop 12 samples before the next edge on the line (1.5 between thin lines on line-art frames), dense texture such as stipple and hatching is left alone, and nothing is found on or measured across the capture's dropouts. Only the samples after an edge change; everything else, flat areas included, passes **bit-identical**, as does every frame outside a certified window.
+
+The calibration assumes the ring stays the same through a window. If the input's response changes part-way through (for example a decoder equaliser that switches during the window), one template fits neither state and certification leaves that part uncorrected.
+
+**Parameters**
+
+* `ring_track` (string)
+    - The certified corrections, one per window of frames. Set it with Edge Ring Calibration. Default: empty (no correction).
+
+**Analysis / preview tools**
+
+* **Edge Ring Calibration** (`edge_ring_calibration`) fits the templates on a third of each ~1024-frame window's frames, certifies each candidate correction on a second third (paired bootstrap, 97.5 % bound: no edge, halo, noise or level measure worse beyond 0.1 % of the step / 0.05 dB / 0.1 IRE; a summed gain of at least 0.5 % of the step, on at least 60 % of the frames), and reports on the last third, which neither step saw. **Apply to Stage** sets `ring_track`. From the command line: `orc-cli tools run disc.orcprj edge_ring_calibration --node <node> --apply`.
+* Supports the standard GUI preview.
+
+---
+
 ## Channel Equalise
 
 | | |
